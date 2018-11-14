@@ -33,8 +33,7 @@ type limitedBroadcast struct {
 	id        int64 // btree-key[2]: unique incrementing id stamped at submission time
 	b         Broadcast
 
-	name   string // set if Broadcast is a NamedBroadcast
-	unique bool   // set if Broadcast is a UniqueBroadcast
+	name string // set if Broadcast is a NamedBroadcast
 }
 
 // Less tests whether the current item is less than the given argument.
@@ -166,6 +165,17 @@ func (q *TransmitLimitedQueue) QueueBroadcast(b Broadcast) {
 	q.queueBroadcast(b, 0)
 }
 
+// lazyInit initializes internal data structures the first time they are
+// needed.  You must already hold the mutex.
+func (q *TransmitLimitedQueue) lazyInit() {
+	if q.tq == nil {
+		q.tq = btree.New(32)
+	}
+	if q.tm == nil {
+		q.tm = make(map[string]*limitedBroadcast)
+	}
+}
+
 // queueBroadcast is like QueueBroadcast but you can use a nonzero value for
 // the initial transmit tier assigned to the message. This is meant to be used
 // for unit testing.
@@ -173,12 +183,7 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.tq == nil {
-		q.tq = btree.New(32)
-	}
-	if q.tm == nil {
-		q.tm = make(map[string]*limitedBroadcast)
-	}
+	q.lazyInit()
 
 	if q.idGen == math.MaxInt64 {
 		// it's super duper unlikely to wrap around within the retransmit limit
@@ -194,10 +199,11 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 		id:        id,
 		b:         b,
 	}
+	unique := false
 	if nb, ok := b.(NamedBroadcast); ok {
 		lb.name = nb.Name()
 	} else if _, ok := b.(UniqueBroadcast); ok {
-		lb.unique = true
+		unique = true
 	}
 
 	// Check if this message invalidates another.
@@ -206,7 +212,7 @@ func (q *TransmitLimitedQueue) queueBroadcast(b Broadcast, initialTransmits int)
 			old.b.Finished()
 			q.deleteItem(old)
 		}
-	} else if !lb.unique {
+	} else if !unique {
 		// Slow path, hopefully nothing hot hits this.
 		var remove []*limitedBroadcast
 		q.tq.Ascend(func(item btree.Item) bool {
